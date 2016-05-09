@@ -1,0 +1,179 @@
+# 在 JS 中如何调度后台任务？
+
+http://web.jobbole.com/86034/
+
+## 它是阻塞式的
+
+关于 JavaScript，就算什么都不记得了，也请牢记这一点：它是阻塞式的。
+
+想象一下，你的浏览器是靠一个神奇的小精灵来运行的。所有的事情都是这一个小精灵来干的，不管是渲染 HTML、响应菜单的命令、在屏幕上绘图、处理鼠标点击，还是执行一个 JavaScript 函数。和我们大多数人一样，小精灵同时只能做一件事。如果我们把好多事都丢给小精灵，它们会被排到一个待处理列表中，按照顺序依次执行。
+
+当小精灵碰到一个 script 标签，或者必须运行一个 JavaScript 函数的时候，所有事情都得停下来。首先得下载代码（如果需要的话），然后立即执行这些脚本，再然后才能继续执行后面的事件或者渲染操作。这个过程是必须的，因为你的脚本可能执行任何操作：加载后续代码、移除所有 DOM 元素、跳转到其他的 URL 等等。就算有两个或者更多的小精灵，在第一个小精灵处理你的代码的时候，剩下那些也得停下来等着。这就是所谓的阻塞式。在长时间运行脚本的时候，正式这种机制导致了浏览器会失去响应。
+
+你经常希望你的 JavaScript 代码能够尽快执行，因为这些代码会初始化组件和事件处理函数。然而，也有一些不那么重要的后台任务，它们并不会直接影响用户体验，例如：
+
+* 记录分析数据
+
+* 把数据发送到社交网络（或者添加 57 个“分享”按钮）
+
+* 内容预读取
+
+* HTML 的预处理或者预渲染
+
+这些任务在时间上并不是那么重要，不过为了让页面保持响应，在用户滚动页面或者与内容进行交互的时候，它们就不应该运行了。
+
+选择之一是使用 Web Worker，它可以在一个独立的线程中并行运行。对于内容预读取和预处理工作而言，这是个不错的选择，不过在 Web Worker 中，你无法直接访问或者更新 DOM。当然你可以在你自己的代码中避免这一点，但你无法保证永远不会依赖第三方代码，比如 Google Analytics。
+
+
+另一种可能的方式是使用 setTimeout，比如：setTimeout(doSomething, 1);。浏览器会在其它立即执行的任务完成后，再去执行 doSomething() 函数。实际上，这种方式是把它放到了待处理列表的最后面。不幸的是，不管是否需要，这个函数最终都会被调用。
+
+## requestIdleCallback
+
+requestIdleCallback 是一个全新的 API，它可以在浏览器空闲的时候去调度那些不那么重要的后台任务。与之类似的还有 requestAnimationFrame，可以通过调用一个函数在下一次重绘之前更新动画
+
+我们可以通过如下方法检测浏览器是否支持 requestIdleCallback：
+
+```
+
+if ('requestIdleCallback' in window) {
+  // requestIdleCallback supported
+  requestIdleCallback(backgroundTask);
+}
+else {
+  // no support - do something else
+  setTimeout(backgroundTask1, 1);
+  setTimeout(backgroundTask2, 1);
+  setTimeout(backgroundTask3, 1);
+}
+
+```
+
+
+也可以指定一个 options 对象作为参数，其中包含超时时间（以毫秒为单位），例如：
+
+
+```
+requestIdleCallback(backgroundTask, { timeout: 3000; });
+
+```
+
+这种方式可以确保你的函数在前 3 秒之内被调用，不论浏览器是否空闲。
+
+requestIdleCallback 只会调用你的函数一次，并传递一个 deadline 对象，该对象内包含如下属性：
+
+* didTimeout — 如果上文提到的超时事件被触发了，该属性为 true
+
+* timeRemaining() — 该函数会返回执行任务所剩余的毫秒数
+
+timeRemaining() 会给任务运行分配不超过 50 毫秒的时间。如果任务执行超过这个时间的话，任务并不会被强行终止，不过推荐的做法是，此时你应该再次调用 requestIdleCallback 来调度后续的处理流程。
+
+让我们创建一个简单的示例，按照顺序执行多个任务。这些任务存储在一个数组中，该数组会在函数内使用：
+
+```
+
+// array of functions to run
+var task = [
+	background1,
+	background2,
+	background3
+];
+ 
+if ('requestIdleCallback' in window) {
+  // requestIdleCallback supported
+  requestIdleCallback(backgroundTask);
+}
+else {
+  // no support - run all tasks soon
+  while (task.length) {
+  	setTimeout(task.shift(), 1);
+  }
+}
+ 
+// requestIdleCallback callback function
+function backgroundTask(deadline) {
+ 
+  // run next task if possible
+  while (deadline.timeRemaining() > 0 && task.length > 0) {
+  	task.shift()();
+  }
+ 
+  // schedule further tasks if necessary
+  if (task.length > 0) {
+    requestIdleCallback(backgroundTask);
+  }
+}
+
+
+```
+
+## 是否有什么事情是不应该放在 requestIdleCallback 中执行的？
+
+
+Paul Lewis 在他的博客中进行了说明，在 requestIdleCallback 中执行的操作应该是小片段的形式，不应该执行那些运行时间无法预测的任务（比如处理 DOM 更适合使用 requestAnimationFrame 回调）。你同样需要当心 Promise 对象的 resolve 或 reject，因为在空闲回调结束后，即使已经没有剩余时间，Promise 的回调也会立即执行。
+
+### requestIdleCallback 的浏览器支持情况
+
+requestIdleCallback 是一个试验性质的特性，规范依然有可能会发生变化，所以如果你遇到了 API 变动的情况请不要吃惊。Chrome 47 支持该特性，也就是说应该在 2015 年结束之前。Opera 也应该很快就会支持该特性。微软和 Mozilla 也在考虑该 API，看起来问题不大。苹果公司一如既往地对此不置可否。如果你现在就要尝尝鲜，你的最佳选择是使用 Chrome Canary（最新版本的 Chrome，没有经过全面测试，但是其中包含了最新的特性）。（译注：在本文翻译时 Chrome 47 已经发布，并支持该特性）
+
+ 
+
+之前提到的 Paul Lewis 创建了一个简单的 requestIdleCallback 替代品。它会实现同样功能的 API，不过它并不是完整的，因为没有模拟浏览器的空闲行为检测。它是靠 setTimeout 来完成功能的，正如上面的例子一样。如果你想要使用该 API，又不想做对象检测和代码更新的话，这也是个不错的选择。
+
+ 
+
+尽管到目前为止支持还比较有限，requestIdleCallback 还是个有趣的东西，可以帮助你最大限度的优化网页性能。不过你是怎么想的呢？欢迎在本文下方发表你的评论
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
